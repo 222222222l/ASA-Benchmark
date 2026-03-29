@@ -1,0 +1,27 @@
+{
+    "evaluation_settings": {
+        "lsnet_checkpoint": "e:/artist-benchmark/comfyui-lsnet/models/lsnet_xl_artist_448.pth",
+        "class_mapping_csv": "e:/artist-benchmark/comfyui-lsnet/class_mapping.csv",
+        "device": "cuda",
+        "batch_size": 16
+    },
+    "test_data_settings": {
+        "test_artists_csv": "test_artists_list.csv",
+        "generated_images_root": "./generated_outputs",
+        "name_sanitization": {
+            "replace_underscore_with_space": true
+        },
+        "prompt_types": [
+            "zero_artist",
+            "standard_1girl",
+            "complex_background",
+            "action_pose",
+            "extreme_close_up"
+        ],
+        "baseline_prompt_type": "zero_artist"
+    },
+    "output_settings": {
+        "report_dir": "./benchmark_reports",
+        "save_detailed_json": true
+    }
+}
