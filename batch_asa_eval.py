@@ -5,24 +5,42 @@ import csv
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 from tqdm import tqdm
-import torch
-import torch.nn.functional as F
-from PIL import Image
-from torchvision import transforms
-from timm.models import create_model
+
+print("Modules imported. Initializing environment...")
 
 # 确保能加载项目中的 lsnet 模型组件
 # 将 comfyui-lsnet 加入 Python 路径
 current_dir = Path(__file__).parent.absolute()
-sys.path.append(str(current_dir / "comfyui-lsnet"))
+lsnet_path = str(current_dir / "comfyui-lsnet")
+if lsnet_path not in sys.path:
+    sys.path.append(lsnet_path)
+
+print(f"Current dir: {current_dir}")
+print(f"LSNet path: {lsnet_path}")
 
 try:
+    print("Loading torch...")
+    import torch
+    print("Loading torch.nn.functional...")
+    import torch.nn.functional as F
+    print("Loading PIL.Image...")
+    from PIL import Image
+    print("Loading torchvision.transforms...")
+    from torchvision import transforms
+    print("Loading timm.models...")
+    from timm.models import create_model
+    print("Loading lsnet_model...")
     from lsnet_model import lsnet_artist  # noqa: F401
-except ImportError:
-    print("Error: Could not find lsnet_model in comfyui-lsnet directory. Please check the path.")
+    print("Core deep learning libraries loaded.")
+except ImportError as e:
+    print(f"IMPORT ERROR: {e}")
+    sys.exit(1)
+except Exception as e:
+    print(f"UNEXPECTED ERROR DURING IMPORT: {e}")
     sys.exit(1)
 
 def load_config(config_path: str):
@@ -43,43 +61,51 @@ def unescape_name(name: str) -> str:
     return name.replace(r'\(', '(').replace(r'\)', ')')
 
 def load_mappings(csv_path: str, replace_underscore: bool) -> Tuple[Dict[str, int], Dict[int, str]]:
-    """加载 class_mapping.csv，返回名称到 ID 的双向映射"""
+    """加载 class_mapping.csv，并建立映射。为了兼容性，键名使用下划线格式。"""
     name_to_id = {}
     id_to_name = {}
     with open(csv_path, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for row in reader:
             raw_name = row['class_name']
-            sanitized_name = sanitize_name(raw_name, replace_underscore)
             class_id = int(row['class_id'])
-            name_to_id[sanitized_name] = class_id
-            id_to_name[class_id] = sanitized_name
+            # 无论输入是什么格式，映射表内部统一使用原始下划线格式
+            name_to_id[raw_name] = class_id
+            id_to_name[class_id] = raw_name
     return name_to_id, id_to_name
 
 def load_test_artists(csv_path: str, replace_underscore: bool) -> List[str]:
     """加载待测试的艺术家列表"""
     artists = []
     with open(csv_path, 'r', encoding='utf-8') as f:
-        # 假设 csv 只有一列或者第一列是艺术家名
         reader = csv.reader(f)
-        # 跳过表头如果存在
-        try:
-            for row in reader:
-                if row:
-                    artists.append(sanitize_name(row[0].strip(), replace_underscore))
-        except StopIteration:
-            pass
+        for row in reader:
+            if row:
+                artists.append(row[0].strip())
     return artists
+
+def get_mapping_key(artist_name: str) -> str:
+    """将测试列表中的转义名称还原为 mapping 表中的原始下划线格式"""
+    # 1. 还原括号转义
+    name = artist_name.replace(r'\(', '(').replace(r'\)', ')')
+    # 2. 空格转回下划线
+    name = name.replace(' ', '_')
+    return name
 
 def get_asa_model(checkpoint_path: str, num_classes: int, device: str):
     """加载评测模型"""
-    model = create_model('lsnet_xl_artist_448', pretrained=False, num_classes=num_classes)
+    # 强制指定特征维度为 2048，匹配 LSNet-XL 的标准输出
+    model = create_model('lsnet_xl_artist_448', pretrained=False, num_classes=num_classes, feature_dim=2048)
+    
     state_dict = torch.load(checkpoint_path, map_location='cpu')
     if 'model' in state_dict:
         state_dict = state_dict['model']
+    
     # 归一化权重键名
     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
+    
+    # 容错加载：支持 Kaloscope 2.0 可能存在的 projection 层差异
+    model.load_state_dict(state_dict, strict=False)
     model.to(device).eval()
     return model
 
@@ -138,6 +164,7 @@ def generate_visualization(summary: Dict, metrics: Dict, report_dir: Path, basel
     plt.close()
 
 def main():
+    print("Initializing ASA Benchmark Evaluation...")
     parser = argparse.ArgumentParser(description="ASA Benchmark Batch Evaluation")
     parser.add_argument("--config", default="benchmark_config.json", help="Path to config file")
     args = parser.parse_args()
@@ -182,22 +209,31 @@ def main():
             continue
 
         for artist_name in tqdm(test_artists, desc=f"Artists in {pt}"):
-            # 兼容下划线和空格的文件夹名，同时处理反转义
-            base_name = unescape_name(artist_name)
-            artist_dir = pt_dir / base_name
-            if not artist_dir.exists():
-                # 尝试下划线格式
-                alt_name = base_name.replace(' ', '_')
-                artist_dir = pt_dir / alt_name
+            # 1. 获取映射表中的键名 (原始下划线格式)
+            mapping_key = get_mapping_key(artist_name)
             
-            if not artist_dir.exists() or not artist_name in name_to_id:
-                continue
-
-            expected_id = name_to_id[artist_name]
-            image_paths = [p for p in artist_dir.glob('*.*') if p.suffix.lower() in ['.png', '.jpg', '.jpeg', '.webp']]
+            # 2. 清洗出 safe_name (对应 run_generation_task.py 中的逻辑，用于文件名匹配)
+            safe_name = re.sub(r'[^\w\s\(\)\-]', '', artist_name).strip()
+            
+            # 3. 在目录中寻找匹配该艺术家 safe_name 的所有文件
+            pattern = f"ASA_Result_{pt}_*{safe_name}*_*.png"
+            image_paths = list(pt_dir.glob(pattern))
             
             if not image_paths:
+                image_paths = list(pt_dir.glob(f"*{safe_name}*.png"))
+            
+            if not image_paths:
+                base_name = unescape_name(artist_name)
+                image_paths = list(pt_dir.glob(f"*{base_name}*.png"))
+
+            if image_paths:
+                if mapping_key not in name_to_id:
+                    print(f"Warning: Found files for {artist_name} (key: {mapping_key}) but artist not in mapping.")
+                    continue
+            else:
                 continue
+
+            expected_id = name_to_id[mapping_key]
 
             # 批量推理
             for i in range(0, len(image_paths), eval_cfg['batch_size']):
@@ -215,7 +251,8 @@ def main():
                 
                 for idx_in_batch, p in enumerate(batch_paths):
                     is_top1 = (top5_indices[idx_in_batch][0] == expected_id).item()
-                    is_top5 = (expected_id in top5_indices[idx_in_batch]).item()
+                    # 修改：expected_id in tensor 返回的是 python bool 或 scalar tensor，直接转换即可
+                    is_top5 = bool(expected_id in top5_indices[idx_in_batch])
                     conf = float(top5_probs[idx_in_batch][0])
 
                     stats_per_prompt[pt]["total"] += 1
@@ -313,4 +350,10 @@ def main():
     print(f"{'='*40}")
 
 if __name__ == "__main__":
-    main()
+    print("Script started...")
+    try:
+        main()
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
