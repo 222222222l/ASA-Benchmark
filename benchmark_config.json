@@ -1,22 +1,18 @@
 {
     "evaluation_settings": {
-        "lsnet_checkpoint": "e:/artist-benchmark/comfyui-lsnet/models/lsnet_xl_artist_448.pth",
-        "class_mapping_csv": "e:/artist-benchmark/comfyui-lsnet/class_mapping.csv",
+        "lsnet_checkpoint": "F:/ComfyUI-aki-v1.3/models/lsnet/kaloscope-2.0/best_checkpoint.pth",
+        "class_mapping_csv": "F:/ComfyUI-aki-v1.3/models/lsnet/kaloscope-2.0/class_mapping.csv",
         "device": "cuda",
         "batch_size": 16
     },
     "test_data_settings": {
-        "test_artists_csv": "test_artists_list.csv",
-        "generated_images_root": "./generated_outputs",
+        "test_artists_csv": "e:/artist-benchmark/test_artists_list.csv",
+        "generated_images_root": "e:/artist-benchmark/test_generated_outputs",
         "name_sanitization": {
-            "replace_underscore_with_space": true
+            "replace_underscore_with_space": false
         },
         "prompt_types": [
-            "zero_artist",
-            "standard_1girl",
-            "complex_background",
-            "action_pose",
-            "extreme_close_up"
+            "zero_artist"
         ],
         "baseline_prompt_type": "zero_artist"
     },

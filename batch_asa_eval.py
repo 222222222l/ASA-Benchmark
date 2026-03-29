@@ -30,10 +30,17 @@ def load_config(config_path: str):
         return json.load(f)
 
 def sanitize_name(name: str, replace_underscore: bool) -> str:
-    """处理艺术家名称转义"""
+    """处理艺术家名称转义：下划线转空格，括号转义 (幂等处理)"""
     if replace_underscore:
-        return name.replace('_', ' ')
+        name = name.replace('_', ' ')
+    # 统一转义括号，先反转义再重新转义以保证幂等
+    name = name.replace(r'\(', '(').replace(r'\)', ')')
+    name = name.replace('(', r'\(').replace(')', r'\)')
     return name
+
+def unescape_name(name: str) -> str:
+    """反转义名称，用于文件路径匹配"""
+    return name.replace(r'\(', '(').replace(r'\)', ')')
 
 def load_mappings(csv_path: str, replace_underscore: bool) -> Tuple[Dict[str, int], Dict[int, str]]:
     """加载 class_mapping.csv，返回名称到 ID 的双向映射"""
@@ -175,11 +182,12 @@ def main():
             continue
 
         for artist_name in tqdm(test_artists, desc=f"Artists in {pt}"):
-            # 兼容下划线和空格的文件夹名
-            artist_dir = pt_dir / artist_name
+            # 兼容下划线和空格的文件夹名，同时处理反转义
+            base_name = unescape_name(artist_name)
+            artist_dir = pt_dir / base_name
             if not artist_dir.exists():
-                # 尝试另一种格式
-                alt_name = artist_name.replace(' ', '_') if ' ' in artist_name else artist_name.replace('_', ' ')
+                # 尝试下划线格式
+                alt_name = base_name.replace(' ', '_')
                 artist_dir = pt_dir / alt_name
             
             if not artist_dir.exists() or not artist_name in name_to_id:
