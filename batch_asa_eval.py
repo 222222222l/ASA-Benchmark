@@ -147,15 +147,15 @@ def generate_visualization(summary: Dict, metrics: Dict, report_dir: Path, basel
     # 子图 2: 核心指标汇总 (雷达图/文本看板)
     ax2.axis('off')
     metrics_text = (
-        f"Core Metrics Summary\n"
-        f"{'-'*30}\n"
-        f"Overall Avg Top-1: {metrics['overall_avg_acc']:.2%}\n"
+        f"Core Metrics Summary (Top-5 Focus)\n"
+        f"{'-'*35}\n"
+        f"Overall Avg Top-5: {metrics['overall_avg_acc']:.2%}\n"
         f"Consistency Score: {metrics['consistency_score']:.4f}\n"
         f"Delta vs Baseline: {metrics['delta_vs_baseline']:+.4f}\n"
         f"Style Resilience:  {metrics['style_resilience']:.4f}\n"
-        f"{'-'*30}\n"
+        f"{'-'*35}\n"
         f"Weighted Score:   {metrics['weighted_score']:.4f}\n"
-        f"(Weighted Score = Avg_Acc * Consistency)"
+        f"(Score = Avg_Top5 * Consistency)"
     )
     ax2.text(0.1, 0.5, metrics_text, fontsize=12, family='monospace', va='center')
 
@@ -186,9 +186,10 @@ def main():
 
     model = get_asa_model(eval_cfg['lsnet_checkpoint'], len(id_to_name), eval_cfg['device'])
 
-    # 2. 图像预处理
+    # 2. 图像预处理 (移除强制 448 缩放，改为仅 CenterCrop 保持特征)
+    # LSNet 内部会自行处理输入尺寸，外部预处理过大会导致特征平滑
     transform = transforms.Compose([
-        transforms.Resize(448),
+        # 移除 transforms.Resize(448),
         transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -250,10 +251,23 @@ def main():
                     top5_probs, top5_indices = torch.topk(probs, k=5, dim=-1)
                 
                 for idx_in_batch, p in enumerate(batch_paths):
-                    is_top1 = (top5_indices[idx_in_batch][0] == expected_id).item()
-                    # 修改：expected_id in tensor 返回的是 python bool 或 scalar tensor，直接转换即可
-                    is_top5 = bool(expected_id in top5_indices[idx_in_batch])
+                    pred_ids = [int(x) for x in top5_indices[idx_in_batch].tolist()]
+                    target_id = int(expected_id)
+                    
+                    is_top1 = (pred_ids[0] == target_id)
+                    is_top5 = (target_id in pred_ids)
                     conf = float(top5_probs[idx_in_batch][0])
+
+                    # --- DEBUG 打印：每类画师仅打印第一个样本的对比 ---
+                    if i == 0 and idx_in_batch == 0:
+                        print(f"\n[DEBUG] File: {p.name}")
+                        print(f"        Expected: {id_to_name[expected_id]} (ID: {expected_id})")
+                        print(f"        Top-3 Predictions:")
+                        for rank in range(3):
+                            p_id = pred_ids[rank]
+                            p_name = id_to_name.get(p_id, "Unknown")
+                            p_conf = float(top5_probs[idx_in_batch][rank])
+                            print(f"          {rank+1}. {p_name} (ID: {p_id}, Conf: {p_conf:.4f})")
 
                     stats_per_prompt[pt]["total"] += 1
                     if is_top1: stats_per_prompt[pt]["correct"] += 1
@@ -290,31 +304,42 @@ def main():
             if pt != baseline_pt:
                 non_baseline_accs.append(acc)
 
-    # --- 核心指标计算优化 ---
-    # 1. Consistency Score (1 - std)
-    consistency_score = 1.0 - np.std(non_baseline_accs) if len(non_baseline_accs) > 1 else 1.0
+    # --- 核心指标计算优化 (已切换至 Top-5 作为主指标) ---
+    # 1. Consistency Score (1 - std) - 使用 Top-5 计算
+    non_baseline_top5_accs = [m['top5_accuracy'] for pt, m in summary.items() if pt != baseline_pt]
     
-    # 2. Overall Avg Acc
-    overall_avg_acc = np.mean(non_baseline_accs) if non_baseline_accs else 0
+    # 逻辑容错：如果仅有 Baseline 数据，则不进行排除
+    if not non_baseline_top5_accs and baseline_pt in summary:
+        non_baseline_top5_accs = [summary[baseline_pt]['top5_accuracy']]
+        print("[Notice] Only baseline data found. Metrics will be calculated based on baseline.")
+
+    consistency_score = 1.0 - np.std(non_baseline_top5_accs) if len(non_baseline_top5_accs) > 1 else 1.0
     
-    # 3. Weighted ASA Score (加权得分：均值 * 一致性) - 惩罚“低准确率的高一致性”模型
-    weighted_score = overall_avg_acc * consistency_score
+    # 2. Overall Avg Top-5 Acc
+    overall_avg_top5_acc = np.mean(non_baseline_top5_accs) if non_baseline_top5_accs else 0
     
-    # 4. Style Resilience (风格韧性)
-    # 定义为：复杂场景(complex_background) 相对于 简单场景(standard_1girl) 的准确率保留率
+    # 3. Weighted ASA Score (加权得分：Top-5 均值 * 一致性)
+    weighted_score = overall_avg_top5_acc * consistency_score
+    
+    # 4. Style Resilience (风格韧性) - 使用 Top-5 计算
     style_resilience = 1.0
     if "standard_1girl" in summary and "complex_background" in summary:
-        s1g = summary["standard_1girl"]["top1_accuracy"]
-        cbg = summary["complex_background"]["top1_accuracy"]
+        s1g = summary["standard_1girl"]["top5_accuracy"]
+        cbg = summary["complex_background"]["top5_accuracy"]
         style_resilience = cbg / s1g if s1g > 0 else 0
+    elif len(summary) == 1:
+        style_resilience = 1.0 # 单一类型无从谈起韧性，设为基准 1.0
 
-    # 5. Delta vs Baseline
+    # 5. Delta vs Baseline - 使用 Top-5 计算
     delta_vs_baseline = 0
-    if baseline_pt and baseline_pt in summary and len(non_baseline_accs) > 0:
-        delta_vs_baseline = overall_avg_acc - summary[baseline_pt]['top1_accuracy']
+    if baseline_pt and baseline_pt in summary:
+        # 如果有非 baseline 数据，计算增益；否则增益为 0
+        other_accs = [m['top5_accuracy'] for pt, m in summary.items() if pt != baseline_pt]
+        if other_accs:
+            delta_vs_baseline = np.mean(other_accs) - summary[baseline_pt]['top5_accuracy']
 
     metrics_final = {
-        "overall_avg_acc": overall_avg_acc,
+        "overall_avg_acc": overall_avg_top5_acc, # 此时该值代表 Top-5
         "consistency_score": consistency_score,
         "weighted_score": weighted_score,
         "style_resilience": style_resilience,
@@ -342,8 +367,8 @@ def main():
     print(f"ASA Benchmark Report: {report_path}")
     print(f"Visualization: {report_dir / 'asa_benchmark_chart.png'}")
     print(f"{'-'*40}")
-    print(f"Weighted Score:   {weighted_score:.4f} (Primary Rank)")
-    print(f"Overall Avg Acc:  {overall_avg_acc:.2%}")
+    print(f"Weighted Score:   {weighted_score:.4f} (Top-5 Focus)")
+    print(f"Overall Avg Top-5: {overall_avg_top5_acc:.2%}")
     print(f"Consistency Score: {consistency_score:.4f}")
     print(f"Style Resilience:  {style_resilience:.4f}")
     print(f"Delta vs Baseline: {delta_vs_baseline:+.4f}")
