@@ -15,8 +15,10 @@ BASELINE_PROMPT = "1girl, solo, long hair, breasts, looking at viewer, simple ba
 # 简化的 ComfyUI API 工作流 JSON (API 格式)
 # 注意：这需要您 ComfyUI 中有对应的 Load Checkpoint 和 KSampler 节点 ID
 # 以下是一个典型的 API 结构模板，您可能需要根据 ComfyUI 的 'Save API Format' 进行微调
-def get_workflow(prompt, artist_name, checkpoint):
-    # 组合最终 Prompt
+import re
+
+def get_workflow(prompt, artist_name, checkpoint, safe_filename):
+    # 组合最终 Prompt (使用带转义的名称)
     full_prompt = f"artist:{artist_name}, {prompt}" if artist_name else prompt
     
     workflow = {
@@ -24,9 +26,9 @@ def get_workflow(prompt, artist_name, checkpoint):
             "inputs": {
                 "seed": 42,
                 "steps": 20,
-                "cfg": 7,
+                "cfg": 5,
                 "sampler_name": "euler",
-                "scheduler": "normal",
+                "scheduler": "simple",
                 "denoise": 1,
                 "model": ["4", 0],
                 "positive": ["6", 0],
@@ -43,8 +45,8 @@ def get_workflow(prompt, artist_name, checkpoint):
         },
         "5": {
             "inputs": {
-                "width": 1024,
-                "height": 1024,
+                "width": 832,
+                "height": 1216,
                 "batch_size": 1
             },
             "class_type": "EmptyLatentImage"
@@ -72,7 +74,8 @@ def get_workflow(prompt, artist_name, checkpoint):
         },
         "9": {
             "inputs": {
-                "filename_prefix": f"ASA_Test_{artist_name}",
+                # 扁平化命名，完全避免触发 ComfyUI 后端的路径扫描 Bug
+                "filename_prefix": f"ASA_Result_zero_artist_{safe_filename}",
                 "images": ["8", 0]
             },
             "class_type": "SaveImage"
@@ -83,36 +86,66 @@ def get_workflow(prompt, artist_name, checkpoint):
 def queue_prompt(prompt_workflow):
     p = {"prompt": prompt_workflow}
     data = json.dumps(p).encode('utf-8')
-    response = requests.post(f"{COMFYUI_API_URL}/prompt", data=data)
-    return response.json()
+    try:
+        response = requests.post(f"{COMFYUI_API_URL}/prompt", data=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"\n[Error Detail] {e.response.text}")
+        raise RuntimeError(f"Failed to queue prompt: {e}")
 
 def main():
+    # --- 环境自愈补丁 ---
+    # 针对 ComfyUI (Aki版) 校验 Bug：自动创建缺失的 output 内部路径
+    bug_fix_path = Path(r"F:\ComfyUI-aki-v1.3\output\checkpoints")
+    if not bug_fix_path.exists():
+        print(f"Applying environment patch: creating {bug_fix_path}")
+        bug_fix_path.mkdir(parents=True, exist_ok=True)
+
     # 1. 加载艺术家列表
+    if not os.path.exists(ARTISTS_LIST_PATH):
+        print(f"Error: {ARTISTS_LIST_PATH} not found.")
+        return
+
     with open(ARTISTS_LIST_PATH, 'r', encoding='utf-8') as f:
         artists = [line.strip() for line in f if line.strip()]
 
+    if not artists:
+        print("Error: No artists found in the list.")
+        return
+
     # 2. 生成图像任务
-    # 为了简化，我们只演示 zero_artist (Baseline) 逻辑
-    # 实际执行时，需要确保 ComfyUI 正在运行
     print(f"Starting image generation for {len(artists)} artists...")
     
-    # 创建 Baseline 目录
-    baseline_dir = Path(OUTPUT_ROOT) / "zero_artist"
-    baseline_dir.mkdir(parents=True, exist_ok=True)
+    # 创建根目录
+    Path(OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
 
-    for artist in tqdm(artists):
-        # 注意：这里仅作为逻辑演示。ComfyUI API 调用需要处理队列等待和文件下载。
-        # 在实际环境中，您可能需要更复杂的脚本来从 API 获取生成的图像并保存到指定路径。
-        # print(f"Queuing: {artist}")
-        # workflow = get_workflow(BASELINE_PROMPT, artist, CHECKPOINT_NAME)
-        # queue_prompt(workflow)
-        pass
+    success_count = 0
+    for artist in tqdm(artists, desc="Queuing Tasks"):
+        # 更加彻底的文件名清洗逻辑
+        # 仅保留中英文字符、数字、空格、括号、短横线
+        # 将任何可能被误认为路径的字符（如 . \ / : 等）全部移除
+        safe_artist_name = re.sub(r'[^\w\s\(\)\-]', '', artist).strip()
+        # 针对 Windows 特殊文件夹名限制进行额外安全处理
+        if not safe_artist_name or safe_artist_name.upper() in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+            safe_artist_name = f"artist_{hash(artist)}"
+        
+        # 提示词传原名 (带转义)，文件名传清洗后的安全名
+        workflow = get_workflow(BASELINE_PROMPT, artist, CHECKPOINT_NAME, safe_artist_name)
+        
+        try:
+            queue_prompt(workflow)
+            success_count += 1
+        except Exception as e:
+            print(f"\n[Error] Stopped at artist '{artist}': {e}")
+            break
 
-    print("\n[Notice] 图像生成脚本已准备就绪。")
-    print("由于 API 环境依赖 ComfyUI 运行且工作流节点 ID 可能不同，请确保：")
-    print(f"1. ComfyUI 正在 {COMFYUI_API_URL} 运行。")
-    print(f"2. 您的工作流中 CheckpointLoaderSimple 节点 ID 为 4，KSampler 为 3。")
-    print("3. 生成的图像已放置在 e:\\artist-benchmark\\test_generated_outputs\\zero_artist 目录下。")
+    print(f"\n[Success] {success_count} tasks queued successfully.")
+    print(f"\n[Notice] 任务已全部下发至 ComfyUI 队列。")
+    print(f"请检查 ComfyUI 的 output 目录，并将生成的图像按以下结构整理至 {OUTPUT_ROOT}：")
+    print(f"  {OUTPUT_ROOT}/zero_artist/[艺术家名]/*.png")
+    print("\n提示：ComfyUI 默认将图像保存在其安装目录下的 output 文件夹中。")
 
 if __name__ == "__main__":
     main()
