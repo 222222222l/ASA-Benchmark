@@ -10,7 +10,7 @@ COMFYUI_API_URL = "http://127.0.0.1:8180"
 CHECKPOINT_NAME = "chenkin-0.39.safetensors"
 ARTISTS_LIST_PATH = r"e:\artist-benchmark\test_artists_list.csv"
 OUTPUT_ROOT = r"e:\artist-benchmark\test_generated_outputs"
-BASELINE_PROMPT = "1girl, solo, long hair, breasts, looking at viewer, simple background, blonde hair, long sleeves, white background, gloves, hat, closed mouth, very long hair, grey hair, ass, cowboy shot, small breasts, puffy sleeves, pink eyes, from side, puffy short sleeves, black headwear, expressionless, half-closed eyes, juliet sleeves, monster girl, cropped legs, arms at sides, arched back, jester cap, puff and slash sleeves, black gloves, elbow gloves, short sleeves, looking to the side"
+BASELINE_PROMPT = "1girl, solo, long hair, looking at viewer, blush, brown hair, long sleeves, hat, animal ears, brown eyes, braid, outdoors, cowboy shot, parted lips, day, hand up, bag, coat"
 
 # 简化的 ComfyUI API 工作流 JSON (API 格式)
 # 注意：这需要您 ComfyUI 中有对应的 Load Checkpoint 和 KSampler 节点 ID
@@ -45,8 +45,8 @@ def get_workflow(prompt, artist_name, checkpoint, safe_filename):
         },
         "5": {
             "inputs": {
-                "width": 832,
-                "height": 1216,
+                "width": 1024,
+                "height": 1024,
                 "batch_size": 1
             },
             "class_type": "EmptyLatentImage"
@@ -60,7 +60,7 @@ def get_workflow(prompt, artist_name, checkpoint, safe_filename):
         },
         "7": {
             "inputs": {
-                "text": "nsfw, low quality, bad anatomy",
+                "text": "low resolution,blur,blurry,mosaic censoring,censoring,extra legs,extra arm,bad anatomy, worst quality,old,early,low quality,quality,lowres,signature,username,bad id,bad twitter id,english commentary,logo,bad hands,mutated ,text,watermask,hands,mammal,anthro,furry,ambiguous form,feral,semi-anthro,",
                 "clip": ["4", 1]
             },
             "class_type": "CLIPTextEncode"
@@ -74,8 +74,8 @@ def get_workflow(prompt, artist_name, checkpoint, safe_filename):
         },
         "9": {
             "inputs": {
-                # 扁平化命名，完全避免触发 ComfyUI 后端的路径扫描 Bug
-                "filename_prefix": f"ASA_Result_zero_artist_{safe_filename}",
+                # 极其简单的命名前缀，方便用户整理
+                "filename_prefix": f"ASA_Result_{safe_filename}",
                 "images": ["8", 0]
             },
             "class_type": "SaveImage"
@@ -94,6 +94,21 @@ def queue_prompt(prompt_workflow):
         if hasattr(e, 'response') and e.response is not None:
             print(f"\n[Error Detail] {e.response.text}")
         raise RuntimeError(f"Failed to queue prompt: {e}")
+
+def get_queue_remaining():
+    """获取 ComfyUI 队列剩余空间"""
+    try:
+        response = requests.get(f"{COMFYUI_API_URL}/queue", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        # queue_running 和 queue_pending 的总和即为已占用的任务数
+        # 默认队列上限通常为 64 或更高，用户提到一次只能加 99 个，这里我们按 99 安全线处理
+        running = len(data.get('queue_running', []))
+        pending = len(data.get('queue_pending', []))
+        return 99 - (running + pending)
+    except Exception as e:
+        print(f"Warning: Could not fetch queue status: {e}")
+        return 0
 
 def main():
     # --- 环境自愈补丁 ---
@@ -116,22 +131,30 @@ def main():
         return
 
     # 2. 生成图像任务
-    print(f"Starting image generation for {len(artists)} artists...")
+    print(f"Starting image generation task...")
     
-    # 创建根目录
-    Path(OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
+    # --- 任务 A: 生成 1 张真正的 Baseline (无画师标签) ---
+    print("Queuing Baseline Task (No Artist Tag)...")
+    baseline_workflow = get_workflow(BASELINE_PROMPT, None, CHECKPOINT_NAME, "GLOBAL_BASELINE")
+    try:
+        queue_prompt(baseline_workflow)
+    except Exception as e:
+        print(f"Baseline task failed: {e}")
 
+    # --- 任务 B: 生成各画师测试图 (带队列监控的分批逻辑) ---
     success_count = 0
-    for artist in tqdm(artists, desc="Queuing Tasks"):
-        # 更加彻底的文件名清洗逻辑
-        # 仅保留中英文字符、数字、空格、括号、短横线
-        # 将任何可能被误认为路径的字符（如 . \ / : 等）全部移除
+    for artist in tqdm(artists, desc="Queuing Artist Tasks"):
+        # 检查队列空间
+        remaining = get_queue_remaining()
+        while remaining <= 0:
+            # print(f"\n[Queue Full] Waiting 10s for ComfyUI to process tasks...")
+            time.sleep(10)
+            remaining = get_queue_remaining()
+
         safe_artist_name = re.sub(r'[^\w\s\(\)\-]', '', artist).strip()
-        # 针对 Windows 特殊文件夹名限制进行额外安全处理
-        if not safe_artist_name or safe_artist_name.upper() in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
-            safe_artist_name = f"artist_{hash(artist)}"
+        if not safe_artist_name: safe_artist_name = f"artist_{hash(artist)}"
         
-        # 提示词传原名 (带转义)，文件名传清洗后的安全名
+        # 这里的 prefix 统一改为简洁格式
         workflow = get_workflow(BASELINE_PROMPT, artist, CHECKPOINT_NAME, safe_artist_name)
         
         try:
