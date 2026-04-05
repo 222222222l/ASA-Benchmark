@@ -14,9 +14,14 @@
             "replace_underscore_with_space": false
         },
         "prompt_types": [
-            "my_test"
+            "standard_1girl",
+            "complex_background"
         ],
-        "baseline_prompt_type": "my_test"
+        "prompt_configs": {
+            "standard_1girl": "1girl, solo, long hair, looking at viewer",
+            "complex_background": "1girl, solo, long hair, looking at viewer, outdoors, detailed forest, sunlight, leaves, waterfall, masterpiece"
+        },
+        "baseline_prompt_type": "standard_1girl"
     },
     "output_settings": {
         "report_dir": "./benchmark_reports",

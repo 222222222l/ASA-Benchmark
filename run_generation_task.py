@@ -53,62 +53,75 @@ def download_image(filename, subfolder, type, save_path):
         f.write(res.content)
 
 def main():
-    # 1. 准备目录
-    test_type = DATA_CFG['prompt_types'][0] # 默认为第一个类型，如 my_test
-    save_dir = OUTPUT_ROOT / test_type
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # 2. 加载画师列表
+    # 1. 准备任务列表 (Prompt Types x Artists)
+    prompt_types = DATA_CFG['prompt_types']
+    prompt_configs = DATA_CFG.get('prompt_configs', {})
+    
+    # 加载画师列表
     with open(ARTISTS_CSV, 'r', encoding='utf-8') as f:
-        artists = [line.strip() for line in f if line.strip()]
+        artists_base = [line.strip() for line in f if line.strip()]
 
-    # 3. 任务队列循环
-    pending_tasks = {} # prompt_id -> artist_name
-    
-    print(f"Starting Benchmark Generation: {len(artists)} artists...")
-    
-    # 插入 Baseline 任务
-    print("Queuing Global Baseline...")
-    artists.insert(0, None) 
+    # 构建总任务列表: (prompt_type, artist_name)
+    all_tasks = []
+    for pt in prompt_types:
+        # 每个目录下先加一个 Baseline
+        all_tasks.append((pt, None))
+        for artist in artists_base:
+            all_tasks.append((pt, artist))
 
-    pbar = tqdm(total=len(artists), desc="Processing")
+    print(f"Total tasks to queue: {len(all_tasks)} ({len(prompt_types)} types x {len(artists_base)+1} artists)")
+
+    # 2. 任务执行循环
+    pending_tasks = {} # prompt_id -> (prompt_type, safe_name)
+    pbar = tqdm(total=len(all_tasks), desc="Processing")
     
-    artist_idx = 0
-    while artist_idx < len(artists) or pending_tasks:
-        # A. 填充队列 (保持 ComfyUI 队列中有任务，但不超过 10 个以防压力过大)
-        while artist_idx < len(artists) and len(pending_tasks) < 10:
-            artist = artists[artist_idx]
+    task_idx = 0
+    while task_idx < len(all_tasks) or pending_tasks:
+        # A. 填充队列 (保持 ComfyUI 队列中有任务，不超过 10 个)
+        while task_idx < len(all_tasks) and len(pending_tasks) < 10:
+            pt, artist = all_tasks[task_idx]
+            prompt_str = prompt_configs.get(pt, BASELINE_PROMPT)
+            
             safe_name = re.sub(r'[^\w\s\(\)\-]', '', artist).strip() if artist else "GLOBAL_BASELINE"
-            workflow = get_workflow(BASELINE_PROMPT, artist, CHECKPOINT, safe_name)
+            workflow = get_workflow(prompt_str, artist, CHECKPOINT, safe_name)
             
             try:
                 pid = queue_prompt(workflow)
-                pending_tasks[pid] = safe_name
-                artist_idx += 1
-            except:
-                time.sleep(5) # 出错等待
+                pending_tasks[pid] = (pt, safe_name)
+                task_idx += 1
+            except Exception as e:
+                print(f"Error queuing task: {e}")
+                time.sleep(5)
         
         # B. 轮询结果并下载
         completed_ids = []
-        for pid, name in pending_tasks.items():
-            history = get_history(pid)
-            if history and 'outputs' in history:
-                # 获取生成的图片信息
-                images = history['outputs'].get('9', {}).get('images', [])
-                for img_info in images:
-                    save_path = save_dir / f"ASA_Result_{name}_{pid[:8]}.png"
-                    download_image(img_info['filename'], img_info['subfolder'], img_info['type'], save_path)
-                completed_ids.append(pid)
-                pbar.update(1)
+        for pid, (pt, name) in pending_tasks.items():
+            try:
+                history = get_history(pid)
+                if history and 'outputs' in history:
+                    # 获取生成的图片信息
+                    images = history['outputs'].get('9', {}).get('images', [])
+                    save_dir = OUTPUT_ROOT / pt
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    for img_info in images:
+                        save_path = save_dir / f"ASA_Result_{name}_{pid[:8]}.png"
+                        download_image(img_info['filename'], img_info['subfolder'], img_info['type'], save_path)
+                    
+                    completed_ids.append(pid)
+                    pbar.update(1)
+            except Exception as e:
+                print(f"Error polling history for {pid}: {e}")
+                time.sleep(1)
         
         for pid in completed_ids:
             del pending_tasks[pid]
             
         if pending_tasks:
-            time.sleep(2) # 轮询间隔
+            time.sleep(2)
 
     pbar.close()
-    print(f"\nDone! All images saved directly to: {save_dir}")
+    print(f"\nDone! All images saved to: {OUTPUT_ROOT}")
 
 if __name__ == "__main__":
     main()
