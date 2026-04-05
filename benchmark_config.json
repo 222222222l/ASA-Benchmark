@@ -1,5 +1,7 @@
 {
     "evaluation_settings": {
+        "comfyui_api_url": "http://127.0.0.1:8180",
+        "target_checkpoint": "chenkin-0.39.safetensors",
         "lsnet_checkpoint": "F:/ComfyUI-aki-v1.3/models/lsnet/kaloscope-2.0/best_checkpoint.pth",
         "class_mapping_csv": "F:/ComfyUI-aki-v1.3/models/lsnet/kaloscope-2.0/class_mapping.csv",
         "device": "cuda",
@@ -12,9 +14,9 @@
             "replace_underscore_with_space": false
         },
         "prompt_types": [
-            "zero_artist"
+            "my_test"
         ],
-        "baseline_prompt_type": "zero_artist"
+        "baseline_prompt_type": "my_test"
     },
     "output_settings": {
         "report_dir": "./benchmark_reports",
