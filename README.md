@@ -1,53 +1,39 @@
-# Artist Style Adherence (ASA) Benchmark System
+# ASA Benchmark
 
-本项目是一个专为动漫生成模型设计的“艺术家风格遵从性”量化评测系统。通过集成 Kaloscope 2.0 (LSNet-XL) 视觉分类模型作为 Ground Truth 验证器，自动评估生成模型在特定画师标签下的表现。
+[中文](README.md) · [English](README.en.md)
 
-## 核心指标体系
+面向动漫生成图像的**画师标签一致性诊断工具**。使用 Kaloscope 2.0（LSNet）对带目标画师标签的生成图进行分类，比较不同模型或提示词条件下的命中率。它衡量生成结果与指定分类器的关联，不能直接判定真实作者、风格复现成功或整体视觉质量。
 
-系统不仅关注单一的准确率，还引入了多维度的稳定性与泛化性指标：
+## 方法与指标
 
-- **Top-5 Accuracy (主指标)**: 考虑到艺术风格的重叠性（例如 A 画师是 B 画师的老师或模仿者），Top-5 命中被视为风格复现成功。
-- **Weighted ASA Score (综合得分)**: `Overall Avg Top-5 * Consistency Score`。该得分惩罚了在不同 Prompt 类型下表现波动巨大的模型，反映了模型的综合素质。
-- **Consistency Score (一致性评分)**: `1.0 - std(accuracies)`。衡量模型在简单背景、复杂场景等不同提示词环境下复现风格的稳定性。
-- **Style Resilience (风格韧性)**: 比较“复杂背景”与“标准提示词”下的性能比率。反映了模型在干扰环境下维持艺术风格的能力。
-- **Delta vs Baseline**: 评估使用特定艺术家标签后，相对于“无艺术家标签（Global Baseline）”的风格偏移量。
+| 指标 | 当前实现与解释 |
+| --- | --- |
+| Top-1 / Top-5 命中率 | 目标标签是否位于分类器预测的前 1 / 5 名；只反映固定分类体系中的标签一致性 |
+| 一致性分数 | `1 − std(各提示词组 Top-5 命中率)`；组间离散度的启发式摘要 |
+| 加权 ASA | `提示词组平均 Top-5 × 一致性分数`；未经独立效度验证的复合指标 |
+| 风格韧性 | 复杂背景与标准提示词命中率的比值；需要同时报告分子、分母及样本数 |
+| 相对基线差 | 有画师条件与无画师条件的分数差；需保持模型、内容、种子和采样设置可比 |
 
-## 环境要求
+分类器预测不是 ground truth。画师标签、构图、角色、配色和训练集重叠都可能影响分数；同源模型或数据会产生评估偏差。Top-5 命中不等于人工评审通过。
 
-### 硬件
-- 建议使用具有 12GB+ 显存的 NVIDIA GPU (用于推理 1024x1024 图像)。
+## 运行
 
-### 软件 (Linux/Windows)
-- Python 3.10+
-- PyTorch 2.4.1+
-- [LSNet-XL 权重文件](file:///F:/ComfyUI-aki-v1.3/models/lsnet/kaloscope-2.0/best_checkpoint.pth)
-- **Triton**: 在 Linux 环境下运行 SKA 算子必须安装：
-  ```bash
-  pip install triton
-  ```
+准备匹配的 Kaloscope 2.0 权重和 `class_mapping.csv`，参考[模型发布页](https://huggingface.co/heathcliff01/Kaloscope2.0)。类别数应以具体权重与标签表一致性为准；早期文档的 39,260 与发布页后续核验的 39,261 不应混用。仓库不包含权重与完整评估数据。
 
-## 快速开始
+1. 安装与 CUDA 匹配的 PyTorch、torchvision，以及 NumPy、Pillow、timm、matplotlib、tqdm；LSNet 的 SKA 路径还依赖 Triton。
+2. 修改 [`benchmark_config.json`](benchmark_config.json) 中的本地权重、标签、图像及输出路径；现有配置是历史机器路径。
+3. 按提示词类型组织图像，文件名保留脚本可解析的目标画师标签。
 
-1. **准备数据**:
-   - 将生成的图像放置在 `generated_images_root` 目录下，按 `prompt_types` 分子目录。
-   - 文件名需包含艺术家名称（例如 `ASA_Result_Mika Pikazo_00001_.png`）。
+```bash
+python batch_asa_eval.py --config benchmark_config.json
+```
 
-2. **配置文件**:
-   - 编辑 `benchmark_config.json`，设置模型路径、数据集路径及 Prompt 类型。
+[`batch_asa_eval.py`](batch_asa_eval.py) 执行评分与汇总；[`run_generation_task.py`](run_generation_task.py) 是另行配置 ComfyUI 后使用的批量生成入口。当前评分预处理包含 `CenterCrop(448)`，不是完整画面评价。训练 checkpoint 可能通过 pickle 加载，只使用可信来源。
 
-3. **运行评测**:
-   ```bash
-   python batch_asa_eval.py --config benchmark_config.json
-   ```
+## 复现与局限
 
-## 文件说明
+发布比较结果时，应同时保存代码提交、分类器与映射表哈希、提示词、随机种子、采样参数、逐图结果、有效/缺失样本数与类别分布。对不同画师和提示词组分别汇总，补充独立表征或盲评，并检查训练/评估图像近重复。当前仓库没有建立通用风格测量的独立效度或跨模型排行榜。
 
-- `batch_asa_eval.py`: 评测引擎，负责图像加载、推理、指标计算及可视化。
-- `run_generation_task.py`: ComfyUI 自动化脚本，用于大规模批量生成测试图。
-- `test_artists_list.csv`: 待测艺术家列表（支持 Danbooru 转义格式）。
-- `class_mapping.csv`: LSNet 支持的 39,260 位艺术家映射表。
+## 来源与许可
 
-## 注意事项
-
-- **Linux 导入报错**: 如果遇到 `No module named 'lsnet_model'`，请确保 `comfyui-lsnet` 子模块已正确下载，且脚本已将该目录添加至 `sys.path`。
-- **分辨率**: 评测时会自动对图像进行 `CenterCrop(448)`，请确保生成的原始图像分辨率不低于 512px，建议 1024px。
+仓库代码见 [Apache-2.0](LICENSE)；分类器、上游 LSNet 实现、图像和生成模型适用各自许可。工具维护与模型方法贡献应分别署名。
